@@ -1,6 +1,6 @@
-Simulation Code for Journal Paper "Accounting for Reliability in Unacknowledged Time-Constrained WSNs" by Philip Parsch and Alejandro Masrur, TU Chemnitz, Germany (contact: philip.parsch@cs.tu-chemnitz.de)
+Simulation code for journal paper "Accounting for Reliability in Unacknowledged Time-Constrained WSNs" by Philip Parsch and Alejandro Masrur, TU Chemnitz, Germany (contact: philip.parsch@cs.tu-chemnitz.de).
 
-Please note that OMNeT++ Version 4.6 is needed to run this code. All configuration is done in omnetpp.ini. Results are outputted as a .csv-file and can be processed by Matlab or Excel.
+Please note that OMNeT++ version 4.6 is needed to run this code. All configuration is done in omnetpp.ini. Results are output as a .csv file and can be processed by Matlab or Excel.
 
 Configuration (in omnetpp.ini) for the graphs:
 CSMA is mode 5
@@ -39,4 +39,4 @@ maxHosts = 75
 submode = 0
 ExternalInterferenceEnable = true
 
-all other parameters can be left as is.
+All other parameters can be left as is.
