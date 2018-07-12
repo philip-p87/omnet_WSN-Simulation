@@ -63,8 +63,10 @@ void Server::initialize()
     HostStepSize = par("HostStepSize");
     minPackets = par("minPackets");
     maxPackets = par("maxPackets");
-    haltOnPacketNumberSent = par("haltOnPacketNumberSent");
-    haltOnDeadlines = par("haltOnDeadlines");
+    sequencesPerIteration = par("sequencesPerIteration");
+    sequencesPerIteration_original = sequencesPerIteration;
+    deadlinesPerIteration = par("deadlinesPerIteration");
+    cyclesPerIteration = par("cyclesPerIteration");
     RX_TX_switching_time = par("RX_TX_switching_time");
     RX_TX_switching_time /= 1000000;
     processing_delay = par("processing_delay");
@@ -76,6 +78,7 @@ void Server::initialize()
     carrierSenseMode = par("carrierSenseMode");
     deadline = par("deadline");
     deadline /= 1000;
+    fixedDeadline = par("fixedDeadline");
 
     CSMA_backoff_time = par("CSMA_backoff_time");
     CSMA_backoff_time /= 1000000;    //convert to µs
@@ -110,6 +113,7 @@ void Server::initialize()
     RTNS_packet_length2 = &par("RTNS_packet_length2");
     RTNS_use_different_node_types = par("RTNS_use_different_node_types");
     RTNS_node_type_ratio = par("RTNS_node_type_ratio");
+    RTNS_node_type_ratio *= 100;
 
     //submode variables
     submode_steps = par("submode_steps");
@@ -215,6 +219,9 @@ void Server::initialize()
         statsAll[i].sequencesGood = 0;    //good sequences
         statsAll[i].sequencesLost = 0;        //failed sequences
         statsAll[i].sequencesTotal = 0;      //number of sequences received in total
+        statsAll[i].sequencesGood2 = 0;    //good sequences
+        statsAll[i].sequencesLost2 = 0;        //failed sequences
+        statsAll[i].sequencesTotal2 = 0;      //number of sequences received in total
         statsAll[i].deadline_missed_counter = 0;
         statsAll[i].ACKsLost = 0;
         statsAll[i].ACKsTransmitted = 0;               //total number of ACKs that were transmitted
@@ -245,7 +252,7 @@ void Server::initialize()
     //overwrite values for individual modes////////////////////////////////////////
     if(mode == 4 || mode == 5 || mode == 6) //CSMA variants
     {
-        receiverInitiated = true; //not yet implemented
+        receiverInitiated = true;
 
         currentPacketCountPerSequence = currentActiveNodes;
         //currentPacketCountPerSequence = 2* currentActiveNodes - 1; //wrong!!!!!! -> server will only receive n packets
@@ -283,6 +290,27 @@ void Server::initialize()
         {
             currentPacketCountPerSequence = maxPackets;
         }
+        //adjust deadline to saved one
+        if(mode == 3 && fixedDeadline == false)
+            deadline = deadline_list_journal[currentActiveNodes-2] / 1000;
+        else if(mode == 2 && fixedDeadline == false)
+            deadline = deadline_list_schweden[currentActiveNodes-2] / 1000;
+        else if(mode == 1 && fixedDeadline == false)
+        {
+            double minPeriod = ((currentActiveNodes-1) * (currentActiveNodes-2)*2*packet_duration) + 2*packet_duration;      //smallest period
+            double longestPeriodTime = minPeriod + (currentActiveNodes-1)*2*packet_duration;
+            deadline = (currentActiveNodes-1)*longestPeriodTime + packet_duration;
+        }
+        else if(mode == 4 && fixedDeadline == false)
+        {
+            double pmin1, pmin2, pmin, pmax;
+            double delta = RX_TX_switching_time + cs_sensitivity; //tset + t_bar
+            pmin1 = ((2*currentActiveNodes - 2)*(currentActiveNodes - 1)*2 + 2) * delta;
+            pmin2 = cs_duration + packet_duration + 2*RX_TX_switching_time + ACK_duration + RX_TX_switching_time + (RX_TX_switching_time + 2*cs_sensitivity); // == L + tset + tsen
+            if(pmin1>pmin2) pmin = pmin1; else pmin = pmin2;
+            pmax = pmin + (currentActiveNodes-1) * 2 * delta;
+            deadline = (2*currentActiveNodes - 2) * pmax + pmin2;
+        }
     }
     else if(mode == 8)   //TDMA no-ACK
     {
@@ -295,12 +323,17 @@ void Server::initialize()
         currentPacketCountPerSequence = TDMA_cycles_per_deadline;
         receiverInitiated = false;   //for now, will also support other non receiver-initiated mode later
         scheduleAt(simTime() + TDMA_guard_time + RX_TX_switching_time, TDMA_sync_start);
-        if(haltOnDeadlines > 0)
-            haltOnPacketNumberSent = haltOnDeadlines * currentActiveNodes;
+        if(deadlinesPerIteration > 0)
+            sequencesPerIteration = deadlinesPerIteration * currentActiveNodes;
         if(TDMA_guard_time < 0)
             TDMA_calculate_guard_time();
     }
 
+    //change iteration steps that every n send exactly the same amount of packets in total
+    //if(mode != 11 && receiverInitiated == true)
+    //{
+    //    sequencesPerIteration = sequencesPerIteration_original/currentActiveNodes; //TODO check
+    //}
 
     //submode configuration
     if(submode == 4)//increase RX_TX_switching_time
@@ -316,6 +349,16 @@ void Server::initialize()
     else if(submode == 6)//increase packet length
     {
         packet_duration = packet_length_start / txRate;
+    }
+    else if(submode == 11 || submode == 12)
+    {
+        if(mode != 7)
+        {
+            EV << "submode not compatible with current mode" << endl;
+            scheduleAt(simTime()-1000, ExternalInterferenceEvent);//create some error
+        }
+        RTNS_use_different_node_types = true;
+        receiverInitiated = false;
     }
 
 
@@ -398,7 +441,6 @@ void Server::initialize()
             << " k=" << currentPacketCountPerSequence << std::endl;
     }
     std::cout << "submode = " << submode << std::endl;
-    //TODO other outputs
     std::cout << "-------------------------------------------------------" << std::endl;
 
     //test debug
@@ -602,6 +644,7 @@ void Server::handleMessage(cMessage *msg)
     {
         if(next_iteration_flag)
         {
+            //std::cout << " restartEvent_counter:" << restartEvent_counter << std::endl;
             EV << "Server: restart" << endl;
             this->start_next_iteration();
             restartEvent_counter = 0;
@@ -745,6 +788,7 @@ void Server::handleMessage(cMessage *msg)
                 //take delay of first packet (do not regard the remaining packets of a sequence that will be received later)
                 if(ACK_is_used == false)
                 {
+                    //TODO hier für submodes type 2 filtern
                     delay->collect(temp_delay);
                     rx_time->collect(temp_rx_time);
                     tx_time->collect(temp_tx_time);
@@ -792,32 +836,57 @@ void Server::handleMessage(cMessage *msg)
             for(int i=0; i < nodesFinishedTransmissionNumber; i++)
             {
                 //check if all packets of a sequence were lost
-                if(packetList[nodesFinishedTransmission[i]].packetsReceivedGood == 0)
+                if(packetList[nodesFinishedTransmissionIDs[i]].packetsReceivedGood == 0)
                 {
                     //all n packets of a sequence have been lost
-                    sequencesLost++;
-                    EV << "Server: Sequence loss! ID: " << nodesFinishedTransmission[i] << endl;      //debug
+                    //TODO submode 11 & 12 filtering
+                    if(submode == 11 || submode == 12)
+                    {
+                        if(RTNS_get_node_type(nodesFinishedTransmissionIDs[i]) == 2)
+                            sequencesLost2++;
+                        else
+                            sequencesLost++;
+                    }
+                    else
+                        sequencesLost++;
+                    EV << "Server: Sequence loss! ID: " << nodesFinishedTransmissionIDs[i] << endl;      //debug
                 }
                 else
                 {
+                    if(submode == 11 || submode == 12)
+                    {
+                        if(RTNS_get_node_type(nodesFinishedTransmissionIDs[i]) == 2)
+                            sequencesGood2++;
+                        else
+                            sequencesGood++;
+                    }
+                    else
+                        sequencesGood++;
                     EV << "Server: debug: sequencesGood++" << endl;
-                    sequencesGood++;
                 }
 
                 //reset counters
-                packetList[nodesFinishedTransmission[i]].packetsReceivedTotal = 0;
-                packetList[nodesFinishedTransmission[i]].packetsReceivedGood = 0;
-                packetList[nodesFinishedTransmission[i]].firstPacketIndex = 1000;
-                packetList[nodesFinishedTransmission[i]].packetsSkipped = 0;
+                packetList[nodesFinishedTransmissionIDs[i]].packetsReceivedTotal = 0;
+                packetList[nodesFinishedTransmissionIDs[i]].packetsReceivedGood = 0;
+                packetList[nodesFinishedTransmissionIDs[i]].firstPacketIndex = 1000;
+                packetList[nodesFinishedTransmissionIDs[i]].packetsSkipped = 0;
 
-                sequencesTotal++;
+                if(submode == 11 || submode == 12)
+                {
+                    if(RTNS_get_node_type(nodesFinishedTransmissionIDs[i]) == 2)
+                        sequencesTotal2++;
+                    else
+                        sequencesTotal++;
+                }
+                else
+                    sequencesTotal++;
                 EV << "Server: debug: sequencesTotal++" << endl;
                 EV << "Server: debug: sequencesLost: " << sequencesLost << "  sequencesGood: " << sequencesGood << "  sequencesTotal: " << sequencesTotal << endl;
                 EV << "Server: debug: packetsLost: " << packetsLost << "  packetsGood: " << packetsGood << "  packetsTotal: " << packetsTotal << endl;
 
                 char buf[32];
-                sprintf(buf, "Message complete (pos2). ID%i Received %i/%i\n", nodesFinishedTransmission[i],
-                                            packetList[nodesFinishedTransmission[i]].packetsReceivedGood, packetList[nodesFinishedTransmission[i]].packetsReceivedTotal);
+                sprintf(buf, "Message complete (pos2). ID%i Received %i/%i\n", nodesFinishedTransmissionIDs[i],
+                                            packetList[nodesFinishedTransmissionIDs[i]].packetsReceivedGood, packetList[nodesFinishedTransmissionIDs[i]].packetsReceivedTotal);
                 EV << buf;
                 if (isGui)
                 {
@@ -832,14 +901,16 @@ void Server::handleMessage(cMessage *msg)
         lastPacketGood = true;
 
         //check whether it is time to switch to next iteration
-        if(sequencesTotal >= haltOnPacketNumberSent && ACK_is_used == false) //for ack-based modes this is checked in notify_about_transmission()
+        if(cyclesPerIteration > 0 && receiverInitiated == true && restartEvent_counter >= cyclesPerIteration && ACK_is_used == false)  //for ack-based modes this is checked in notify_about_transmission()
+        {
+            next_iteration_flag = true;
+        }
+        else if(((sequencesTotal >= sequencesPerIteration) || (sequencesTotal2 >= sequencesPerIteration)) && ACK_is_used == false)
         {
             if(receiverInitiated)
                 next_iteration_flag = true;
             else
-            {
                 this->start_next_iteration();
-            }
             return;
         }
 
@@ -868,6 +939,7 @@ void Server::handleMessage(cMessage *msg)
         temp_packets_per_sequence = msg->par("packets_per_sequence");
         temp_packets_skipped = msg->par("packets_skipped");
         temp_deadline = msg->par("deadline"); //deadline of that packet; for mode == 7 RTNS
+        RTNS_node_type = msg->par("type");
         cPacket *pkt = check_and_cast<cPacket *>(msg);
         ASSERT(pkt->isReceptionStart());
         simtime_t endReceptionTime = simTime() + pkt->getDuration();
@@ -968,7 +1040,7 @@ void Server::handleMessage(cMessage *msg)
             packetList[senderId].packetsReceivedTotal++;
             if(packetList[senderId].packetsReceivedTotal >= currentPacketCountPerSequence)
             {
-                nodesFinishedTransmission[nodesFinishedTransmissionNumber] = senderId;
+                nodesFinishedTransmissionIDs[nodesFinishedTransmissionNumber] = senderId;
                 nodesFinishedTransmissionNumber++;
             }
         }
@@ -989,6 +1061,7 @@ void Server::finish()
 {
     double collisionPackets[MAX_ITERATIONS+2];    //packets within a seaquence
     double collisionSequences[MAX_ITERATIONS+2];    //sequences
+    double collisionSequences2[MAX_ITERATIONS+2];    //node type 2 (submode 11 & 12)
 
     std::ofstream myfile;
     std::string file_output = vectorOutput.substr(1,vectorOutput.size()-2); //remove quotation marks
@@ -1052,11 +1125,20 @@ void Server::finish()
             collisionSequences[i] = (double)statsAll[i].sequencesLost / (double)statsAll[i].sequencesTotal * 100 ;  //in percent
         else
             collisionSequences[i] = -1;
+        if(statsAll[i].sequencesTotal2 != 0)
+            collisionSequences2[i] = (double)statsAll[i].sequencesLost2 / (double)statsAll[i].sequencesTotal2 * 100 ;  //in percent
+        else
+            collisionSequences2[i] = -1;
+
+        std::cout << "finish(): collisionSequences[" << i << "]= " << collisionSequences[i] << "   sequencesLost: " << statsAll[i].sequencesLost << "   sequencesTotal: " << statsAll[i].sequencesTotal << std::endl;  //TODO debug output
+        std::cout << "finish(): collisionSequences2[" << i << "]= " << collisionSequences2[i] << "   sequencesLost2: " << statsAll[i].sequencesLost2 << "   sequencesTotal2: " << statsAll[i].sequencesTotal2 << std::endl;
+        //TODO
+        //-> maybe change setting to higher node count to make simulation easier (or decrease maximum deadline) since the paper settings are not easy to simulate for different deadlines
     }
 
 
 
-    myfile << "haltOnPacketNumberSent: " << haltOnPacketNumberSent << "   packet length[µs]:" << packet_duration*1e6 << "  number of packets:" << currentPacketCountPerSequence;
+    myfile << "sequencesPerIteration: " << sequencesPerIteration << "   packet length[µs]:" << packet_duration*1e6 << "  number of packets:" << currentPacketCountPerSequence;
     if(deadline_is_used)
         myfile << "   deadline[ms]: " << deadline*1e3 << "   use different node types: " << RTNS_use_different_node_types;
     myfile << endl;
@@ -1065,7 +1147,7 @@ void Server::finish()
     if(ClockDriftPlotMode == true)
     {
 
-        myfile << "Clock Drift; sequence loss [%]; packet loss [%]; avg delay [ms]; receive time [ms]; transmit time [ms]; sleep time[ms]; deadline missed counter; deadline missed [%]\n";
+        myfile << "Clock Drift; reliability [%]; packet loss [%]; avg delay [ms]; receive time [ms]; transmit time [ms]; sleep time[ms]; deadline missed counter; deadline missed [%]\n";
 
         //if(ClockDriftPlotCurrentStepNumber > 100) ClockDriftPlotCurrentStepNumber = 100;
         for (int i = 0; i<= ClockDriftPlotStepNumber; i++) //ClockDriftPlotStepNumber
@@ -1074,7 +1156,7 @@ void Server::finish()
             double deadline_missed_percent = (double)statsAll[i].deadline_missed_counter / (double)statsAll[i].packetsGood * 100;
 
 
-            myfile << current_drift << ";" << collisionSequences[i] << ";" << collisionPackets[i] << ";"
+            myfile << current_drift << ";" << 100 - collisionSequences[i] << ";" << collisionPackets[i] << ";"
                     << statsAll[i].delay_avg*1000 << ";" << statsAll[i].rx_time_avg*1000 << ";" << statsAll[i].tx_time_avg*1000 << ";" << statsAll[i].sleep_time_avg*1000
                     << ";" << (double)statsAll[i].deadline_missed_counter << ";" << deadline_missed_percent << ";" << endl;
 
@@ -1100,14 +1182,14 @@ void Server::finish()
     else if(ExternalInterferencePlotMode == true)
     {
 
-        myfile << "duty cycle; sequence loss [%]; packet loss [%]; avg delay [ms]; receive time [ms]; transmit time [ms]; sleep time[ms]; sent packets per sequence; skipped packets per sequence;\n";
+        myfile << "duty cycle; reliability [%]; packet loss [%]; avg delay [ms]; receive time [ms]; transmit time [ms]; sleep time[ms]; sent packets per sequence; skipped packets per sequence;\n";
 
         //if(ClockDriftPlotCurrentStepNumber > 100) ClockDriftPlotCurrentStepNumber = 100;
         for (int i = 0; i<= ExternalInterferencePlotStepNumber; i++) //ClockDriftPlotStepNumber
         {
             double current_duty_cycle = i * (100 * ExternalInterferenceDutyCycle / ExternalInterferencePlotStepNumber);
 
-            myfile << current_duty_cycle << ";" << collisionSequences[i] << ";" << collisionPackets[i] << ";" << statsAll[i].delay_avg*1000 << ";"
+            myfile << current_duty_cycle << ";" << 100 - collisionSequences[i] << ";" << collisionPackets[i] << ";" << statsAll[i].delay_avg*1000 << ";"
                    << statsAll[i].rx_time_avg*1000 << ";" << statsAll[i].tx_time_avg*1000 << ";" << statsAll[i].sleep_time_avg*1000
                    << ";" << statsAll[i].packets_per_sequence_avg << ";" << statsAll[i].packets_skipped_avg << ";" << endl;
 
@@ -1259,10 +1341,77 @@ void Server::finish()
             EV << "----------------------------------------------------------" << endl << endl;
         }
     }
+    else if(submode == 11)//RTNS: increase packet length l_2
+        {
+            EV << "submode:" << submode << "   #nodes:" << currentActiveNodes << "  #packets:" << currentPacketCountPerSequence << "  d1:" << deadline << "  L1:" << pkLenBits->doubleValue() << "bits  d2:" << RTNS_deadline2 << "  steps:" << submode_steps << endl;
+            EV << "----------------------------------------------------------" << endl << endl;
+            myfile << "submode:" << submode << "   nodes:" << currentActiveNodes << " (" << RTNS_node_type_ratio << "% type 1)  packets:" << currentPacketCountPerSequence
+                    << "  deadline 1:" << deadline << "  packet length 1:" << pkLenBits->doubleValue() << "  deadline 2:" << RTNS_deadline2 << endl;
+            myfile << "packet length 2 [bits]; rel1 [%]; rel2 [%]; avg delay [ms]; rx time [ms]; tx time [ms]; sleep time[ms];" << "RTNS_reliability;" << "\n";
+
+            for(int i=0; i<(int)submode_steps; i++)
+            {
+                //stop outputting when last entry is over (number == 0)
+                if(statsAll[i].numberOfNodes == 0)
+                    break;
+
+                //TODO
+                double temp = packet_length_start + (packet_length_stop-packet_length_start)/(submode_steps-1)*i;
+                temp = floor(temp);
+
+                //file output
+                myfile << temp << ";" << 100 - collisionSequences[i] << ";" << 100 - collisionSequences2[i] << ";"
+                        << (double)statsAll[i].delay_avg*1000 <<  ";" << statsAll[i].rx_time_avg*1000 << ";" << statsAll[i].tx_time_avg*1000 << ";" << statsAll[i].sleep_time_avg*1000;
+                if(mode == 7 || mode == 9 || mode == 10)
+                    myfile << ";" << statsAll[i].RTNS_reliability;
+                myfile << endl;
+
+                //console output
+                if(mode != 0) EV << "packet length: " << temp << " bits" << endl;
+                EV << "Sequences total: " << statsAll[i].sequencesTotal << "   lost: " << statsAll[i].sequencesLost
+                        << "  loss in percent: " << collisionSequences[i] << "\n";
+                EV << "avg delay [ms]: " << statsAll[i].delay_avg*1000 << endl;
+                EV << "avg packets per sequence: " << statsAll[i].packets_per_sequence_avg << endl;
+                EV << "----------------------------------------------------------" << endl << endl;
+            }
+        }
+    else if(submode == 12)//RTNS: increase deadline
+    {
+        EV << "submode:" << submode << "   #nodes:" << currentActiveNodes << "  #packets:" << currentPacketCountPerSequence << "  steps:" << submode_steps << endl;
+        EV << "----------------------------------------------------------" << endl << endl;
+        myfile << "submode:" << submode << "   nodes:" << currentActiveNodes << " (" << RTNS_node_type_ratio << "% type 1)  packets:" << currentPacketCountPerSequence
+                << "  packet length :" << pkLenBits->doubleValue() << "  deadline 1:" << deadline << "  deadline 2:" << RTNS_deadline2 << endl;
+        myfile << "deadline 2 [ms]; rel1 [%]; rel2 [%]; avg delay [ms]; rx time [ms]; tx time [ms]; sleep time[ms];" << "RTNS_reliability;" << "\n";
+        for(int i=0; i<(int)submode_steps; i++)
+        {
+            //stop outputting when last entry is over (number == 0)
+            if(statsAll[i].numberOfNodes == 0)
+                break;
+
+            //TODO assign deadline start in host.cc
+            double temp = deadline_start + (deadline_stop-deadline_start)/(submode_steps-1)*i;
+            temp *= 1e3;
+
+            //file output
+            myfile << temp << ";" << 100 - collisionSequences[i] << ";" << 100 - collisionSequences2[i] << ";"
+                    << (double)statsAll[i].delay_avg*1000 <<  ";" << statsAll[i].rx_time_avg*1000 << ";" << statsAll[i].tx_time_avg*1000 << ";" << statsAll[i].sleep_time_avg*1000;
+            if(mode == 7 || mode == 9 || mode == 10)
+                myfile << ";" << statsAll[i].RTNS_reliability;
+            myfile << endl;
+
+            //console output
+            if(mode != 0) EV << "deadline: " << temp << " ms" << endl;
+            EV << "Sequences total: " << statsAll[i].sequencesTotal << "   lost: " << statsAll[i].sequencesLost
+                    << "  loss in percent: " << collisionSequences[i] << "\n";
+            EV << "avg delay [ms]: " << statsAll[i].delay_avg*1000 << endl;
+            EV << "avg packets per sequence: " << statsAll[i].packets_per_sequence_avg << endl;
+            EV << "----------------------------------------------------------" << endl << endl;
+        }
+    }
 /////////////////////////////////////// Normal operation ////////////////////////////////////////////////////////////////////////////////////
     else
     {
-        myfile << "Number of Nodes; Numbers of packets; sequence loss [%]; packet loss [%]; avg delay [ms]; min delay [ms]; max delay [ms]; receive time [ms]; transmit time [ms]; sleep time[ms]; sent packets per sequence; skipped packets per sequence; ";
+        myfile << "Number of Nodes; Numbers of packets; deadline [ms]; sequence loss [%]; packet loss [%]; avg delay [ms]; min delay [ms]; max delay [ms]; receive time [ms]; transmit time [ms]; sleep time[ms]; sent packets per sequence; skipped packets per sequence; ";
         if(mode == 7 || mode == 9 || mode == 10)
             myfile << "RTNS_reliability";
         myfile << "\n";
@@ -1276,7 +1425,7 @@ void Server::finish()
                 break;
 
 
-            myfile << statsAll[i].numberOfNodes << ";" << statsAll[i].numberOfPackets << ";" << collisionSequences[i] << ";" << collisionPackets[i]
+            myfile << statsAll[i].numberOfNodes << ";" << statsAll[i].numberOfPackets << ";" << statsAll[i].deadline*1000 << ";" << collisionSequences[i] << ";" << collisionPackets[i]
                    << ";" << (double)statsAll[i].delay_avg*1000 << ";" << (double)statsAll[i].delay_min*1000 << ";" << (double)statsAll[i].delay_max*1000 << ";" << statsAll[i].rx_time_avg*1000 << ";" << statsAll[i].tx_time_avg*1000
                    << ";" << statsAll[i].sleep_time_avg*1000 << ";" << statsAll[i].packets_per_sequence_avg << ";" << statsAll[i].packets_skipped_avg;
                    //(double)statsAll[i].avg_delay * 1000 << ";" << statsAll[i].packetsSkipped << ";" << mean << ";" <<"\n";
@@ -1337,11 +1486,15 @@ void Server::start_next_iteration()
     statsAll[storage_index].sequencesGood = sequencesGood;
     statsAll[storage_index].sequencesLost = sequencesLost;
     statsAll[storage_index].sequencesTotal = sequencesTotal;
+    statsAll[storage_index].sequencesGood2 = sequencesGood2;
+    statsAll[storage_index].sequencesLost2 = sequencesLost2;
+    statsAll[storage_index].sequencesTotal2 = sequencesTotal2;
     statsAll[storage_index].numberOfPackets = currentPacketCountPerSequence;
     statsAll[storage_index].numberOfNodes = currentActiveNodes;
     statsAll[storage_index].ACKsLost = ACKsLost;
     statsAll[storage_index].packetsSkipped = packetsSkipped;
     statsAll[storage_index].deadline_missed_counter = deadline_missed_counter;
+    statsAll[storage_index].deadline = deadline;
     statsAll[storage_index].delay_avg = delay->getMean();
     statsAll[storage_index].delay_min = delay->getMin();
     statsAll[storage_index].delay_max = delay->getMax();
@@ -1354,6 +1507,39 @@ void Server::start_next_iteration()
     statsAll[storage_index].packets_per_sequence_avg = packets_per_sequence->getMean();
     statsAll[storage_index].packets_skipped_avg = packets_skipped->getMean();
     statsAll[storage_index].sleep_time_avg = sleep_time->getMean();
+
+
+    //TODO
+    //debug output
+    //std::cout << "finish(): collisionSequences2[" << i << "]= " << collisionSequences2[i] << "   sequencesLost2: " << statsAll[i].sequencesLost2 << "   sequencesTotal2: " << statsAll[i].sequencesTotal2 << std::endl;
+
+    //adjust deadline to shortest one (if enabled)
+    if(mode == 3 && fixedDeadline == false)
+        deadline = deadline_list_journal[currentActiveNodes-2] / 1000;
+    else if(mode == 2 && fixedDeadline == false)
+        deadline = deadline_list_schweden[currentActiveNodes-2] / 1000;
+    else if(mode == 1 && fixedDeadline == false)
+    {
+        double minPeriod = ((currentActiveNodes-1) * (currentActiveNodes-2)*2*packet_duration) + 2*packet_duration;      //smallest period
+        double longestPeriodTime = minPeriod + (currentActiveNodes-1)*2*packet_duration;
+        deadline = (currentActiveNodes-1)*longestPeriodTime + packet_duration;
+    }
+    else if(mode == 4 && fixedDeadline == false)
+    {
+        double pmin1, pmin2, pmin, pmax;
+        double delta = RX_TX_switching_time + cs_sensitivity; //tset + t_bar
+        pmin1 = ((2*currentActiveNodes - 2)*(currentActiveNodes - 1)*2 + 2) * delta;
+        pmin2 = cs_duration + packet_duration + 2*RX_TX_switching_time + ACK_duration + RX_TX_switching_time + (RX_TX_switching_time + 2*cs_sensitivity); // == L + tset + tsen
+        if(pmin1>pmin2) pmin = pmin1; else pmin = pmin2;
+        pmax = pmin + (currentActiveNodes-1) * 2 * delta;
+        deadline = (2*currentActiveNodes - 2) * pmax + pmin2;
+    }
+    statsAll[storage_index].deadline = deadline;
+    //std::cout << "deadline_list_journal[" << currentActiveNodes-2 << "]=" << deadline_list_journal[currentActiveNodes-2] << std::endl;
+
+    //manually override sleep times
+    if(mode == 3 || mode == 2 || mode == 1)
+        statsAll[storage_index].sleep_time_avg = statsAll[storage_index].deadline - statsAll[storage_index].tx_time_avg;
 
     //RTNS bidirectional
     if(mode == 7 || mode == 9 || mode == 10)
@@ -1529,6 +1715,32 @@ void Server::start_next_iteration()
         std::cout << "submode_step_current: " << submode_step_current << " packet length: " << temp << " bits"  << std::endl;
         std::cout << "packet_duration: " << packet_duration*1e6 << std::endl;
     }
+    else if(submode == 11)//RTNS: increase packet length
+    {
+        //check if max iteration number has been reached
+        submode_step_current++;
+        if(submode_step_current >= submode_steps)
+            this->endSimulation(); //will call finish()
+
+        //TODO
+        //calculate new packet length
+        double temp = packet_length_start + (packet_length_stop-packet_length_start)/(submode_steps-1)*submode_step_current;
+        temp = floor(temp); //round down
+        packet_duration = temp/txRate;
+        std::cout << "submode_step_current: " << submode_step_current << " packet length: " << temp << " bits"  << std::endl;
+        //std::cout << "packet_duration2: " << packet_duration*1e6 << std::endl;
+    }
+    else if(submode == 12)//RTNS: increase deadline
+    {
+        //check if max iteration number has been reached
+        submode_step_current++;
+        if(submode_step_current >= submode_steps)
+            this->endSimulation(); //will call finish()
+
+        //calculate new packet length
+        deadline2 = deadline_start + (deadline_stop-deadline_start)/(submode_steps-1)*submode_step_current;
+        std::cout << "submode_step_current: " << submode_step_current << " deadline2: " << deadline2*1000 << " ms"  << std::endl;
+    }
 
     /////////////////////////////////////////////////////////////
     //normal mode (no clock drift & external interference)
@@ -1602,7 +1814,7 @@ void Server::start_next_iteration()
             if(host->getIndex() < currentActiveNodes)
             {
                 host->stop_transmission();
-                host->change_transmission_scheme(currentPacketCountPerSequence, currentActiveNodes, RX_TX_switching_time, deadline, packet_duration);
+                host->change_transmission_scheme(currentPacketCountPerSequence, currentActiveNodes, RX_TX_switching_time, deadline, packet_duration, submode_step_current);
             }
         }
     }
@@ -1610,6 +1822,11 @@ void Server::start_next_iteration()
     //EV << "currentPacketCountPerSequence: " << currentPacketCountPerSequence << " currentActiveNodes: " << currentActiveNodes << endl;
     //std::cout << "currentPacketCountPerSequence: " << currentPacketCountPerSequence << " currentActiveNodes: " << currentActiveNodes << std::endl;
 
+
+    //if(mode != 11 && receiverInitiated == true)
+    //{
+    //    sequencesPerIteration = sequencesPerIteration_original/currentActiveNodes; //TODO check
+    //}
 
     if(receiverInitiated == true)// && mode != 8) //no TDMA
     {
@@ -1626,8 +1843,8 @@ void Server::start_next_iteration()
     {
         //do nothing here, activation is done when beacon is received
 
-        if(haltOnDeadlines > 0)
-            haltOnPacketNumberSent = haltOnDeadlines * currentActiveNodes;
+        if(deadlinesPerIteration > 0)
+            sequencesPerIteration = deadlinesPerIteration * currentActiveNodes;
     }
     else
     {
@@ -1660,7 +1877,7 @@ void Server::initVariables()
         packetList[i].firstPacketIndex = 1000;
         packetList[i].packetsSkipped = 0;
 
-        nodesFinishedTransmission[i] = 1000;
+        nodesFinishedTransmissionIDs[i] = 1000;
     }
 
     lastID = 0;
@@ -1669,6 +1886,9 @@ void Server::initVariables()
     sequencesGood = 0;
     sequencesLost = 0;
     sequencesTotal = 0;
+    sequencesGood2 = 0;
+    sequencesLost2 = 0;
+    sequencesTotal2 = 0;
     packetsGood = 0;
     packetsLost = 0;
     packetsTotal = 0;
@@ -1912,8 +2132,8 @@ bool Server::carrier_sense_simple()
 }
 
 
-// is called by host when it finishes its sequence (when it successfully received an ACK) -> sends all recorded data to the sink
 // for ack-based modes only
+// is called by host when it finishes its sequence (when it successfully received an ACK) -> sends all recorded data to the sink
 void Server::notify_about_transmission(int ID, bool success, double rx_time_, double tx_time_)
 {
     sequencesTotal++;
@@ -1944,15 +2164,16 @@ void Server::notify_about_transmission(int ID, bool success, double rx_time_, do
     sleep_time->collect(temp_sleep_time);
 
     //switch to next iteration if necessary
-    if(sequencesTotal >= haltOnPacketNumberSent) // && receiveBeginSignal == false) // && receiverInitiated == false)
+    if(cyclesPerIteration > 0 && receiverInitiated == true && restartEvent_counter >= cyclesPerIteration)  //for ack-based modes this is checked in notify_about_transmission()
+    {
+        next_iteration_flag = true;
+    }
+    if(sequencesTotal >= sequencesPerIteration)
     {
         if(receiverInitiated)
             next_iteration_flag = true;
         else
-        {
             this->start_next_iteration();
-        }
-
     }
 
     //EV << "temp_delay: " << temp_delay << "    temp_rx_time: " << temp_rx_time << "    temp_tx_time: " << temp_tx_time << endl;
@@ -1967,6 +2188,11 @@ void Server::calculate_restart_interval()
                 restartInterval = 2 * deadline;
             else
                 restartInterval = 10; //TODO calculate this
+    //case 2:
+    //case 3:
+    case 4:
+        restartInterval = 50;
+        break;
     case 7:
     case 9:
     case 10:
@@ -1988,5 +2214,19 @@ void Server::TDMA_calculate_guard_time()
     TDMA_guard_time = time_per_cycle / (maxHosts+1);
     EV << "guard time:" << TDMA_guard_time*1e6 << " us" << endl;
 }
+
+int Server::RTNS_get_node_type(int ID_)  //returns 1 or 2
+{
+    //calculate node type
+    double percent_current = (100 / (double)currentActiveNodes) * ((double)ID_ + 1);
+
+    if((percent_current <= RTNS_node_type_ratio || ((int)RTNS_node_type_ratio == 100)) || RTNS_use_different_node_types == false)
+        RTNS_node_type = 1;
+    else
+        RTNS_node_type = 2;
+
+    return RTNS_node_type;
+}
+
 
 }; //namespace

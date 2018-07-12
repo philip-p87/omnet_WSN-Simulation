@@ -58,6 +58,8 @@ void Host::initialize()
     carrierSenseMode = par("carrierSenseMode");
     deadline = par("deadline");
     deadline /= 1000;
+    RTNS_deadline1 = deadline;
+    fixedDeadline = par("fixedDeadline");
 
     CSMA_backoff_time = par("CSMA_backoff_time");
     CSMA_backoff_time /= 1000000;    //convert to µs
@@ -101,7 +103,7 @@ void Host::initialize()
     //external interference and clock drift
     ClockDriftEnabled = par("ClockDriftEnabled");
     ClockDriftRangePercent = par("ClockDriftRangePercent");
-    ClockDriftRangePercent /= 100;                                                  // conversion to percent
+    ClockDriftRangePercent /= 100;// conversion to percent
     ClockDriftPlotMode = par("ClockDriftPlotMode");
     ClockDriftPlotStepNumber = par("ClockDriftPlotStepNumber");
     //ClockDriftPlotStepNumber++;
@@ -123,6 +125,7 @@ void Host::initialize()
     RX_TX_switching_time_stop /= 1e6;
     packet_length_start = par("packet_length_start");
     packet_length_stop = par("packet_length_stop");
+    submode_step_current = 0;
 
 
     if(ClockDriftEnabled == false) ClockDriftPlotMode = false;
@@ -170,10 +173,29 @@ void Host::initialize()
     {
         packet_duration = packet_length_start / txRate;
     }
+    else if(submode == 11 || submode == 12)
+    {
+        //if(mode != 7)
+        //{
+        //    EV << "submode not compatible with current mode" << endl;
+        //    scheduleAt(simTime()-1000, endTxEvent);//create some error
+        //}
+        RTNS_use_different_node_types = true;
+        receiverInitiated = false;
+
+        RTNS_node_type = RTNS_get_node_type();
+        if(RTNS_node_type == 2)
+        {
+            if(submode == 11)
+                packet_duration = packet_length_start/txRate;
+            else if(submode == 12)
+                deadline = deadline_start;
+        }
+    }
 
 
     //all modes that use carrier sensing
-    if(mode == 4 || (mode == 5) || mode == 6 || mode == 10)
+    if(mode == 4 || mode == 5 || mode == 6 || mode == 10)
     {
         cs_duration = 2 * cs_sensitivity +  RX_TX_switching_time + processing_delay;
         carrier_sense_is_used = true;
@@ -184,10 +206,6 @@ void Host::initialize()
     //all modes that use deadlines
     if(mode == 7 || mode == 9  || mode == 10)       //RTNS based modes
     {
-        if(RTNS_get_node_type() == 1)
-            deadline = deadline;
-        else
-            deadline = RTNS_deadline2;
         deadline_is_used = true;
     }
     else if(mode == 5 && CSMA_deadline > 0)         //CSMA if deadline is enabled
@@ -233,7 +251,7 @@ void Host::initialize()
 
     else if(mode==10) //RTCSA
     {
-        LONG_PAUSE = false; //TODO nach erfolgreichem ACK deadline warten oder gleich weitersenden? -> deadline warten, weil so in paper angegeben
+        LONG_PAUSE = false;
         packetNumberMax = maxPackets;
     }
     else if(mode == 11) //TDMA with ACK
@@ -293,7 +311,7 @@ void Host::start_at_random()
 
         delay_time_stamp = simTime();
 
-        scheduleAt(simTime()+periodTime, endTxEvent);
+        scheduleAt(simTime()+periodTime, endTxEvent);   //start right away without additional shuffling
     }
     //CSMA
     else if(mode == 5)
@@ -312,18 +330,21 @@ void Host::start_at_random()
         else
             delay_time_stamp = simTime()+periodTime;//do not count initial back off as delay
 
-        //TODO
         delay_time_stamp = simTime()+shuffling_time; //do not dad shuffling time to delay, but initial backoff
 
         EV<< "node: "<< this->getIndex() << "  random start: " << periodTime << endl;
         scheduleAt(simTime()+periodTime+shuffling_time, endTxEvent);
     }
 
-    else if (mode == 1 || mode == 2 || mode == 3)
+
+    else if (mode == 1 || mode == 2 || mode == 3 || mode == 4)
     {
-        double delay_temp = uniform(0,periodTime_original);
+        double delay_temp = uniform(0,100*packet_duration);//periodTime_original);
+        //double delay_temp = uniform(0,periodTime_original/2);
+        //double delay_temp = uniform(0,deadline/2);
         delay_time_stamp = simTime() + delay_temp;
         scheduleAt(simTime() + delay_temp, endTxEvent);
+        EV<< "node: "<< this->getIndex() << " random start delay: " << delay_temp <<  endl;
     }
 
     //all other options
@@ -353,7 +374,7 @@ void Host::activate()
     start_at_random();
 }
 
-void Host::change_transmission_scheme(int packetNumberMax_, int currentActiveNodes_, double RX_TX_switching_time_, double deadline_, double packet_duration_)
+void Host::change_transmission_scheme(int packetNumberMax_, int currentActiveNodes_, double RX_TX_switching_time_, double deadline_, double packet_duration_, double submode_step_current_)
 {
     Enter_Method("change_transmission_scheme()");
 
@@ -372,8 +393,11 @@ void Host::change_transmission_scheme(int packetNumberMax_, int currentActiveNod
     packetNumberMax = packetNumberMax_;
     currentActiveNodes = currentActiveNodes_;
     RX_TX_switching_time = RX_TX_switching_time_;
-    deadline = deadline_;
-    packet_duration = packet_duration_;
+    if(submode != 12)
+        deadline = deadline_;
+    if(submode != 11)
+        packet_duration = packet_duration_;
+    submode_step_current = submode_step_current_;
     if(carrier_sense_is_used)
         cs_duration = 2 * cs_sensitivity +  RX_TX_switching_time + processing_delay;
     if(TDMA_guard_time_automatic_flag)
@@ -473,13 +497,14 @@ void Host::handleMessage(cMessage *msg)
             }
             else if(packetNumber >= packetNumberMax)
             {
-                EV << "node: " << this->getIndex() << "  transmitted all " << packetNumber << " packets" << endl;
+                EV << "node: " << this->getIndex() << "  transmitted all " << packetNumber << " packets  -> sleep" << endl;
                 finish_tx();
             }
             else if(mode == 4 || mode == 6) //paper mode (reliable csma)
             {
                 //mode 4: wait for one period (at this point, the node has already waited for tsen + tset + tdata + tproc + tset + tack)
                 scheduleAt(simTime() + periodTime - cs_duration - 2*RX_TX_switching_time - packet_duration - processing_delay - ACK_duration, endTxEvent);
+                EV << "node: " << this->getIndex() << " schedule next packet in (periodTime): " << periodTime <<endl;
             }
             else if(mode == 9)  //RTNS with ACK
             {
@@ -578,7 +603,10 @@ void Host::handleMessage(cMessage *msg)
                     finish_tx();
                 }
                 else
-                    EV << "node: " << this->getIndex() << " transmission failed -> back off: " << periodTime <<endl;
+                {
+                    EV << "node: " << this->getIndex() << " transmission failed -> back off: " << periodTime << endl;
+                    EV << "node: " << this->getIndex() << "  packetNumber: " << packetNumber << "  packetNumberSkipped: " << packetNumberSkipped << endl;
+                }
             }
             else
             {
@@ -674,7 +702,7 @@ void Host::handleMessage(cMessage *msg)
                     TDMA_desync = true;
                     EV << "node: " << this->getIndex() << "  desync!!!" << endl;
 
-                    //alternativlösung
+                    //alternative solution
                     next_sync_request = (deadline/TDMA_cycles_per_deadline - TDMA_beacon_duration - RX_TX_switching_time - TDMA_guard_time/2);
                     double delta = (next_sync_request) * (TDMA_beacons_missed - TDMA_max_beacons_lost_before_desync) * TDMA_default_clock_drift;
                     TDMA_rx_sync_overhead += TDMA_beacon_duration + 2*RX_TX_switching_time + TDMA_guard_time/2 + delta;
@@ -918,7 +946,6 @@ simtime_t Host::getNextInterSequenceTime()
 {
     simtime_t  t = 0;
     double random_time = 0; //random offset to archive some shuffling
-    long double buf;
 
     //calculate random offset ////////////////////////////////////////
     //if (mode == 4 || mode == 6)
@@ -933,34 +960,46 @@ simtime_t Host::getNextInterSequenceTime()
     }
     else if(mode == 7 || mode == 9 || mode == 10) //RTNS based modes
     {
-        //random period time
-        periodTime_original = RTNS_get_random_pause();
-
         //since we schedule the first packet of the next sequence here, we have to wait for the remaining time until the old deadline has passed
         //calculate remaining time to deadline
+        random_time = (deadline - (simTime().dbl() - delay_time_stamp.dbl()));
         //EV << "node: " << this->getIndex() << " time passed since sequence start: " <<  simTime().dbl() - delay_time_stamp.dbl() << endl;
-        if(RTNS_node_type == 1)
+
+        //old
+        /*if(RTNS_node_type == 1)
             buf = (deadline - (simTime().dbl() - delay_time_stamp.dbl()));
         else
-            buf = (RTNS_deadline2 - (simTime().dbl() - delay_time_stamp.dbl()));
+            buf = (RTNS_deadline2 - (simTime().dbl() - delay_time_stamp.dbl()));*/
 
-        random_time = buf;
 
         EV << "node: " << this->getIndex() << " added last sequence pause time of: " <<  random_time << endl;
 
         //add some more time for shuffling
-        random_time += uniform(0, RTNS_tmin1/10); //TODO this changes results
+        //if(submode != 11 && submode != 12) //do not add this random time for submodes //TODO check if that is needed
+            random_time += uniform(0, RTNS_tmin1/10);
     }
     else if(mode == 8) //TDMA
     {
         t = TDMA_cycle_duration_drifted - packet_duration + simTime();
         return t;
     }
+    else if(mode == 1 || mode == 2 || mode == 4)
+    {
+        //wait until the end deadline
+        simtime_t remaining_time = simTime() - delay_time_stamp;
+        random_time = remaining_time.dbl() + deadline; //waiting time equals to reamining time to deadline and full deadline (inter-sequnce pause)
+    }
     else if(mode == 3 && submode != 3) //SIES Journal
     {
-        //TODO
+        simtime_t remaining_time = simTime() - delay_time_stamp;
+        //int random_number = (int)uniform(0,currentActiveNodes+0.9999);
+        //double a;
+
+        //temp solution: wait until the end of deadline and then wait a short random time
+        random_time = remaining_time.dbl() + uniform(0, 100*packet_duration);
+
         //zufällig ein vielfaches der periode bestimmen. Falls sequenz dann zu ende ist, kann wieder zufällig gewartet werden.
-        random_time = (int)uniform(0, maxHosts-packetNumberMax-1)*periodTime;
+        //random_time = (int)uniform(0, maxHosts-packetNumberMax-1)*periodTime;
         //random_time = uniform(0, periodTime);
     }
 
@@ -988,6 +1027,7 @@ simtime_t Host::getNextInterSequenceTime()
     //RTNS based modes
     if(mode == 7 || mode == 9 || mode == 10)
     {
+        periodTime = RTNS_get_random_pause();
         random_time += periodTime;
     }
     //clock drift : re-shuffle period times after each sequence
@@ -1071,6 +1111,8 @@ void Host::sendPacket(char *name)
     pk->addPar("packets_skipped");
     pk->par("packets_skipped").setDoubleValue(packetNumberSkipped);
     pk->setBitLength(pkLenBits->longValue());
+    pk->addPar("type");
+    pk->par("type").setLongValue(RTNS_node_type);
 
     sendDirect(pk, 0, packet_duration, server->gate("in"));
 }
@@ -1119,18 +1161,24 @@ void Host::calculatePeriods(int maxPaketNumber, int numberOfTransmittingNodes)
     //calculate periods
     if(this->getIndex() < currentActiveNodes)
     {
-        if(mode == 1)   //SIES
+        if(mode == 1)   //SIES (DEEP analytic)
         {
             minPeriod = ((numberOfTransmittingNodes-1) * (numberOfTransmittingNodes-2)*2*l_max) + 2*l_max;      //smallest period
             periodTime_original = minPeriod + (this->getIndex() * 2 * l_max);                           //period = smallest period + index*2*packet_duration
             longestPeriodTime = minPeriod + (numberOfTransmittingNodes-1)*2*l_max;
-            intersequence_pause = longestPeriodTime + l_max;
+            intersequence_pause = (numberOfTransmittingNodes-1)*longestPeriodTime + l_max;
+            if(fixedDeadline == false)
+                deadline = intersequence_pause;
+            EV << "node " << getIndex() << "   periodTime_original: " << periodTime_original*1000 << " ms" << endl;
+            EV << "node " << getIndex() << "   intersequence_pause: " << intersequence_pause*1000 << " ms" << endl;
         }
         else if(mode == 2)   //Schweden
         {
             periodTime_original = period_list_schweden[currentActiveNodes-2][this->getIndex()] * l_max;
             intersequence_pause = (period_list_schweden[currentActiveNodes-2][currentActiveNodes-1] * (currentActiveNodes-1) +1) * l_max;
-            EV << "periodTime: " << periodTime_original << "   intersequence_pause: " << intersequence_pause << endl;
+            if(fixedDeadline == false)
+                deadline = deadline_list_schweden[currentActiveNodes-2] / 1000; //convert to seconds
+            EV << "periodTime: " << periodTime_original*1000 << " ms  intersequence_pause: " << intersequence_pause*1000 << " ms" << endl;
             EV << "periodTime: " << periodTime_original/l_max << "[lmax]   intersequence_pause: " << intersequence_pause/l_max << "[lmax]" << endl;
 
             if(submode == 3)
@@ -1141,26 +1189,30 @@ void Host::calculatePeriods(int maxPaketNumber, int numberOfTransmittingNodes)
             }
 
         }
-        else if(mode == 3)            //Journal: SIES with different deadlines and packet lengths
+        else if(mode == 3)            //Journal (DEEP heuristic): SIES with different deadlines and packet lengths
         {
 
             //temp
-            if(submode == 3)
+            if(submode == 3) //use the same inter-sequence pause as for mode == 1
             {
+                //calculate inter-sequence pause (which is (n-1) times the longest period)
                 minPeriod = ((numberOfTransmittingNodes-1) * (numberOfTransmittingNodes-2)*2*l_max) + 2*l_max;      //smallest period
                 longestPeriodTime = minPeriod + (numberOfTransmittingNodes-1)*2*l_max;
-                intersequence_pause = longestPeriodTime + l_max;
+                intersequence_pause = (numberOfTransmittingNodes-1)*longestPeriodTime + l_max;
             }
             else
                 intersequence_pause = 0;
 
-            periodTime_original = period_list_journal[currentActiveNodes-2][this->getIndex()] / 3 * l_max;         //time base is 1byte
+            periodTime_original = period_list_journal[currentActiveNodes-2][this->getIndex()] /22 * l_max;
+            if(fixedDeadline == false)
+                deadline = deadline_list_journal[currentActiveNodes-2] / 1000; //convert to seconds
+            EV << "deadline_list_journal["<< currentActiveNodes-2 << "]: " << deadline << endl;
             //intersequence_pause = (period_list_journal[currentActiveNodes-2][0] * (currentActiveNodes-1) +2) / 3 * l_max;
             //intersequence_pause = periodTime_original; //modified transmission scheme: inter-sequence pause is just one period
-            EV << "periodTime: " << periodTime_original << "   intersequence_pause: " << intersequence_pause << endl;
-            EV << "periodTime: " << periodTime_original/l_max*3 << "[lmax]   intersequence_pause: " << intersequence_pause/l_max*3 << "[lmax]" << endl;
+            EV << "periodTime: " << periodTime_original*1000 << " ms   intersequence_pause: " << intersequence_pause*1000 << " ms" << endl;
+            EV << "periodTime: " << periodTime_original/l_max << "[lmax]   intersequence_pause: " << intersequence_pause/l_max << "[lmax]" << endl;
         }
-        else if (mode == 4) //neuer Alg für DSD paper: bidirectional, ACK, carrier-sense, 100% reliable
+        else if (mode == 4) //(bi-DEEP) neuer Alg für DSD paper: bidirectional, ACK, carrier-sense, 100% reliable
         {
             double pmin1, pmin2, pmin, pmax;
             double delta = RX_TX_switching_time + cs_sensitivity; //tset + t_bar
@@ -1168,10 +1220,13 @@ void Host::calculatePeriods(int maxPaketNumber, int numberOfTransmittingNodes)
             pmin2 = cs_duration + packet_duration + 2*RX_TX_switching_time + ACK_duration + RX_TX_switching_time + (RX_TX_switching_time + 2*cs_sensitivity); // == L + tset + tsen
             pmin = max(pmin1, pmin2);
             //pmin = pmin2; // debug
-            periodTime_original = pmin + this->getIndex() * 2 * delta; //in µs
-
+            periodTime_original = pmin + this->getIndex() * 2 * delta; //in s
             pmax = pmin + (currentActiveNodes-1) * 2 * delta;
             intersequence_pause = (2*currentActiveNodes - 2) * pmax + pmin2;
+            if(fixedDeadline == false)
+                deadline = intersequence_pause;
+
+
             EV << "periodTime: " << periodTime_original << "   intersequence_pause: " << intersequence_pause << endl;
             EV << "periodTime: " << periodTime_original/l_max*3 << "[lmax]   intersequence_pause: " << intersequence_pause/l_max*3 << "[lmax]" << endl;
         }
@@ -1190,7 +1245,7 @@ void Host::calculatePeriods(int maxPaketNumber, int numberOfTransmittingNodes)
         }
         else if(mode == 7 || mode == 9) //RTNS: random periods, k packets
         {
-            int n_1, n_2; //the number of nodes of type 1 and 2; n_1 + n_2 = numberOfTransmittingNodes
+            //int n_1, n_2; //the number of nodes of type 1 and 2; n_1 + n_2 = numberOfTransmittingNodes
             double buf;
             double m = RTNS_m;
 
@@ -1199,78 +1254,120 @@ void Host::calculatePeriods(int maxPaketNumber, int numberOfTransmittingNodes)
 
             RTNS_node_type = RTNS_get_node_type();
 
-            buf = (double)numberOfTransmittingNodes * RTNS_node_type_ratio / 100;
-            n_1 = (int)buf;
-            n_2 = numberOfTransmittingNodes - n_1;
-            //EV << "n_1 " << n_1 << "    n_2 " << n_2 << endl;
+            if(submode == 11 && RTNS_node_type == 2)
+            {
+                double packet_length_temp = floor(packet_length_start + (packet_length_stop-packet_length_start)/(submode_steps-1)*submode_step_current);
+                l_max = packet_length_temp / txRate;
+                packet_duration = l_max;
+                EV << "node " << getIndex() << " new packet length: " << packet_length_temp << endl;
+            }
+            if(submode == 12 && RTNS_node_type == 2)
+            {
+                deadline = deadline_start + (deadline_stop-deadline_start)/(submode_steps-1)*submode_step_current;
 
-            RTNS_tmax1 = (deadline - l_max)/(double)maxPaketNumber;
-            RTNS_tmax2 = (RTNS_deadline2 - l_max)/(double)maxPaketNumber;
-            buf = pow(1-RTNS_reliability, (1/(double)maxPaketNumber)); //k root of 1-p
-            RTNS_tmin1 = RTNS_tmax1 - (2*m* ((double)numberOfTransmittingNodes-1) * l_max) / buf;
-            RTNS_tmin2 = RTNS_tmax2 - (2*m* ((double)numberOfTransmittingNodes-1) * l_max) / buf;
+                double buffer = floor(deadline / RTNS_deadline1);
+                if(buffer < 1) buffer = 1;
+                m = buffer;
 
-            //maximize reliability
-            if(RTNS_reliability_max == true)
+                //TODO check
+                ////////////////////////////////////////////////begin algorithm
+                //calculate m with algorithm 1 of RTNS Journal
+                double tmax1,tmin1,tmax2,tmin2,m12, m21,m2,p2_neu,p2_alt,delta_coll;
+                RTNS_calculate_node_numbers();
+                tmax1 = (RTNS_deadline1 - packet_duration) / (double)maxPaketNumber;
+                tmin1 = tmax1 / 2;
+                tmax2 = (deadline - packet_duration) / (double)maxPaketNumber;
+
+                p2_alt = 0;
+                m2=1;
+                while(1)
+                {
+                    //increase m2 and see if system is still feasible
+                    m2 = m2 + 1; //line 11 (here m2 is m2)
+                    tmin2 = tmax2 - m2 * tmin1; //line 12
+                    m12 = ceil((tmax2-tmin2) / tmin1); //line 13
+
+                    //calculate reliability with Equ. 23
+                    delta_coll = 2*packet_duration* (RTNS_n1*m2 + (RTNS_n2-1)*1); //Equ. 22
+                    p2_neu = 1 - pow((delta_coll/(tmax2-tmin2)), (double)maxPaketNumber);
+
+                    //check if system is still feasible
+                    if (tmin2 < (tmax2/2))
+                        break;
+                    else if (tmin2 < tmin1)
+                        break;
+                    else if (p2_alt > p2_neu)
+                        break;
+
+                   //checks were successful -> next iteration
+                   p2_alt = p2_neu;
+                }
+                //restore last valid values for m2 and tmin2
+                m2 = m2 - 1;
+                tmin2 = tmax2 - m2 * tmin1;
+                m21 = ceil((tmax2-tmin2) / tmin1);
+                m12 = ceil((tmax1-tmin1) / tmin2);
+
+                //calculate reliability with Equ. 23
+                delta_coll = 2*packet_duration* (RTNS_n1*m2 + (RTNS_n2-1)*1);
+                p2_neu = 1 - pow((delta_coll/(tmax2-tmin2)), (double)maxPaketNumber);
+
+
+                //sprintf("d2 = %f;  m2 = %f;  tmin2 = %f;  tmax2 = %f;  m12 = %f;  m21 = %f;  p2_neu = %f\n", deadline*1000, m2, tmin2*1000, tmax2*1000, m12, m21, p2_neu*100);
+
+                //debug output
+                //if(getIndex() == 15)
+                //    std::cout << "d2: " << deadline*1000 << "   m2: " << m2 << "   tmin2: " << tmin2 << "   tmax2: " << tmax2 << "   m12: " << m12 << "   m21: " << m21 << "   p2_neu: " << p2_neu << std::endl;
+                ////////////////////////////////////////////////end algorithm
+
+                //set variables
+                RTNS_tmax1 = tmax2;
+                RTNS_tmin1 = tmin2;
+                RTNS_reliability = p2_neu;
+
+                EV << "node " << getIndex() << "   new deadline: " << deadline << "   new m: " << m << endl;
+                //std::cout << "node " << getIndex() << "   new deadline: " << deadline << "   new m: " << m << std::endl;
+
+
+                //debug output
+                //if(getIndex() == 15)
+                //{
+                //    std::cout << "node " << getIndex() << "   new deadline: " << deadline << "   new m: " << m << std::endl;
+                //}
+            }
+            else
             {
                 RTNS_tmax1 = (deadline - l_max)/(double)maxPaketNumber;
-                RTNS_tmin1 = RTNS_tmax1/2;
-                buf = (2*RTNS_m*((double)numberOfTransmittingNodes-1)*l_max) / (RTNS_tmax1-RTNS_tmin1);
-                RTNS_reliability = 1 - pow(buf, maxPaketNumber);
-                //EV << "RTNS_reliability: " << RTNS_reliability << endl;
-            }
+                buf = pow(1-RTNS_reliability, (1/(double)maxPaketNumber)); //k root of 1-p
+                RTNS_tmin1 = RTNS_tmax1 - (2*m* ((double)numberOfTransmittingNodes-1) * l_max) / buf;
 
-            if(RTNS_tmin1 < (RTNS_tmax1/2))
-            {
-                EV << "Error: reliability not possible anymore" << std::endl;
-                RTNS_tmin1 = -1; RTNS_tmax1=-1;
-                RTNS_tmin2 = -1; RTNS_tmax2=-1;
-            }
-
-            if(RTNS_use_different_node_types)
-            {
-                RTNS_tmax1 = (deadline - l_max) / ((double)maxPaketNumber * (1+ClockDriftPlotDriftRange_temp));
-                RTNS_tmax2 = (RTNS_deadline2 - l_max) / ((double)maxPaketNumber * (1+ClockDriftPlotDriftRange_temp));
-                buf = pow((100-RTNS_reliability)/100, (1/(double)maxPaketNumber));
-
-                if(RTNS_node_type == 1)
+                //maximize reliability
+                if(RTNS_reliability_max == true)
                 {
-                    RTNS_tmin1 = RTNS_tmax1 - (m * ( ((double)numberOfTransmittingNodes-1) * l_max + (n_1-1) * l_max + n_2 * data_duration2))/buf;
+                    RTNS_tmax1 = (deadline - l_max)/(double)maxPaketNumber;
+                    RTNS_tmin1 = RTNS_tmax1/2;
+                    buf = (2*RTNS_m*((double)numberOfTransmittingNodes-1)*l_max) / (RTNS_tmax1-RTNS_tmin1);
+                    RTNS_reliability = 1 - pow(buf, maxPaketNumber);
+                    //EV << "RTNS_reliability: " << RTNS_reliability << endl;
                 }
-                else
-                {
-                    RTNS_tmin2 = RTNS_tmax2 - (m * ( ((double)numberOfTransmittingNodes-1) * data_duration2 + (n_2-1) * data_duration2 + n_1 * l_max))/buf;
-                }
-            }
 
-            //Verify found intervals
-            if(RTNS_use_different_node_types == false)
-            {
+                if(RTNS_tmin1 < (RTNS_tmax1/2))
+                {
+                    EV << "Error: reliability not possible anymore" << std::endl;
+                    RTNS_tmin1 = -1; RTNS_tmax1=-1;
+                }
+
+                //Verify found intervals
                 if( (RTNS_tmin1 >= (RTNS_tmax1 - l_max)) || (RTNS_tmin1 < (RTNS_tmax1/(m+1))) )
                 {
                     EV << "node " << getIndex() << " period invalid!!!" << endl;
                 }
-            }
-            else
-            {
-                if( (RTNS_tmin1 >= (RTNS_tmax1 - l_max)) || (RTNS_tmin1 < (RTNS_tmax1/(m+1)))
-                        || (RTNS_tmin2 >= (RTNS_tmax2 - l_max)) || (RTNS_tmin2 < (RTNS_tmax2/(m+1))))
-                {
-                    EV << "node " << getIndex() << " period invalid!!!" << endl;
-                }
+
+                intersequence_pause = 0;
             }
 
-            if(RTNS_node_type == 1)
-            {
-                EV << "node " << getIndex() << " : tmax: " << RTNS_tmax1*1000 << "   tmin: "<< RTNS_tmin1*1000 << endl;
-            }
-            else
-            {
-                EV << "node " << getIndex() << " : tmax2: " << RTNS_tmax2*1000 << "   tmin2: "<< RTNS_tmin2*1000 << endl;
-            }
-
-            intersequence_pause = 0;
-            EV << "node " << getIndex() << " : type "<< RTNS_node_type << endl;
+            EV<< "node: "<< this->getIndex() << " i am type: " << RTNS_node_type << " with d: " << deadline << "  and l: " << packet_duration << endl;
+            EV << "node " << getIndex() << " : tmax: " << RTNS_tmax1*1000 << "   tmin: "<< RTNS_tmin1*1000 << endl;
         }//end else if(mode == 7) RTNS mode
 
 
@@ -1288,8 +1385,8 @@ void Host::calculatePeriods(int maxPaketNumber, int numberOfTransmittingNodes)
             buf = pow(1-RTNS_reliability, (1/(double)maxPaketNumber)); //k root of 1-p
             RTNS_tmin1 = RTNS_tmax1 - (((double)numberOfTransmittingNodes-1) * d_tot) / buf;
 
-            RTNS_tmax2 = RTNS_tmax1;
-            RTNS_tmin2 = RTNS_tmin1;
+            //RTNS_tmax2 = RTNS_tmax1;
+            //RTNS_tmin2 = RTNS_tmin1;
 
 
             //maximize reliability
@@ -1306,7 +1403,7 @@ void Host::calculatePeriods(int maxPaketNumber, int numberOfTransmittingNodes)
             {
                 EV << "Error: reliability not possible anymore" << std::endl;
                 RTNS_tmin1 = -1; RTNS_tmax1=-1;
-                RTNS_tmin2 = -1; RTNS_tmax2=-1;
+                //RTNS_tmin2 = -1; RTNS_tmax2=-1;
             }
         }
 
@@ -1342,6 +1439,14 @@ void Host::calculatePeriods(int maxPaketNumber, int numberOfTransmittingNodes)
 double Host::max(double a, double b)
 {
     if(a>b)
+        return a;
+    else
+        return b;
+}
+
+double Host::min(double a, double b)
+{
+    if(a<b)
         return a;
     else
         return b;
@@ -1459,12 +1564,8 @@ double Host::Clock_drift_calculate_period(double period)
 
 double Host::RTNS_get_random_pause()
 {
-    double random_time_buf;
+    double random_time_buf = uniform(RTNS_tmin1, RTNS_tmax1);
 
-    if(RTNS_node_type == 1)
-        random_time_buf = uniform(RTNS_tmin1, RTNS_tmax1);
-    else
-        random_time_buf = uniform(RTNS_tmin2, RTNS_tmax2);
 
     /*if(ClockDriftEnabled)
     {
@@ -1489,6 +1590,19 @@ int Host::RTNS_get_node_type()
 {
     //calculate node type
     double percent_current = (100/(double)currentActiveNodes)*((double)this->getIndex()+1);
+
+    if((percent_current <= RTNS_node_type_ratio || ((int)RTNS_node_type_ratio == 100)) || RTNS_use_different_node_types == false)
+        RTNS_node_type = 1;
+    else
+        RTNS_node_type = 2;
+
+    return RTNS_node_type;
+}
+
+int Host::RTNS_get_node_type(int i)
+{
+    //calculate node type
+    double percent_current = (100/(double)currentActiveNodes)*((double)i+1);
 
     if((percent_current <= RTNS_node_type_ratio || ((int)RTNS_node_type_ratio == 100)) || RTNS_use_different_node_types == false)
         RTNS_node_type = 1;
@@ -1616,6 +1730,7 @@ void Host::calc_sequence_stats()
     case 7: //RTNS
         tx_time = packetNumberMax * packet_duration;
         rx_time = 0;
+        sleep_time = deadline - tx_time;
         break;
     //modes with cs and ACK
     case 4:  //reliable CSMA (DSD16)
@@ -1656,6 +1771,7 @@ void Host::calc_sequence_stats()
     //calculate sleep times
     if(deadline_is_used || mode == 11)
         sleep_time = deadline - tx_time - rx_time;
+    else if(mode == 2 || mode == 3) ;//nothing
     else
         sleep_time = message_delay - tx_time - rx_time;
 }
@@ -1668,6 +1784,20 @@ void Host::TDMA_calculate_guard_time()
     time_per_cycle = time_per_cycle - (TDMA_beacon_duration + 2*RX_TX_switching_time) - maxHosts*(packet_duration + 2*RX_TX_switching_time + ACK_duration);  //substract one beacon and all packet slots (without guard time intervals)
     TDMA_guard_time = time_per_cycle / (maxHosts+1);
     //EV << "guard time:" << TDMA_guard_time*1e6 << " us" << endl;
+}
+
+void Host::RTNS_calculate_node_numbers()
+{
+    RTNS_n1 = 0;
+    RTNS_n2 = 0;
+
+    for(int i=0; i< currentActiveNodes; i++)
+    {
+        if(RTNS_get_node_type(i) == 1)
+            RTNS_n1++;
+        else
+            RTNS_n2++;
+    }
 }
 
 }; //namespace

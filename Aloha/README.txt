@@ -1,6 +1,6 @@
-Simulation code for journal paper "Accounting for Reliability in Unacknowledged Time-Constrained WSNs" by Philip Parsch and Alejandro Masrur, TU Chemnitz, Germany (contact: philip.parsch@cs.tu-chemnitz.de).
+Simulation Code for Journal Paper "Accounting for Reliability in Unacknowledged Time-Constrained WSNs" by Philip Parsch and Alejandro Masrur, TU Chemnitz, Germany (contact: philip.parsch@cs.tu-chemnitz.de)
 
-Please note that OMNeT++ version 4.6 is needed to run this code. All configuration is done in omnetpp.ini. Results are output as a .csv file and can be processed by Matlab or Excel.
+Please note that OMNeT++ Version 4.6 is need to run this code. All configuration is done in omnetpp.ini. Results are outputted as a .csv-file and can be processed by Matlab or Excel.
 
 Configuration (in omnetpp.ini) for the graphs:
 CSMA is mode 5
@@ -39,4 +39,33 @@ maxHosts = 75
 submode = 0
 ExternalInterferenceEnable = true
 
-All other parameters can be left as is.
+all other parameters can be left as is.
+
+
+
+NEW 12.07.18 --------
+
+-Fig.7
+minHosts = 30
+maxHosts = 30
+submode = 0
+Aloha.ExternalInterferenceEnable = true
+
+-Fig.8b
+minHosts = 30
+maxHosts = 30
+submode = 11
+submode_steps = 20				
+packet_length_start = 176				
+packet_length_stop = 4800
+sequencesPerIteration = 1000000
+
+-Fig.9b
+minHosts = 30
+maxHosts = 30
+Aloha.pkLenBits = 800b
+submode = 12
+Aloha.deadline_start = 2500				
+Aloha.deadline_stop = 5000
+submode_steps = 75					
+sequencesPerIteration = 10000000 (simulation needs a long time > 24h for all curves)

@@ -25,7 +25,8 @@ simple Host
         double cs_sensitivity @unit(us);
         volatile int ACKLenBits @unit(b);  // packet length in bits
         double deadline;
-        //int haltOnPacketNumberSent;		  //Stopp nach sovielen Paketen
+        bool fixedDeadline;
+        //int sequencesPerIteration;		  //Stopp nach sovielen Paketen
         
         double CSMA_backoff_time @unit(us);
 		int CSMA_max_retransmissions;

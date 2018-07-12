@@ -31,6 +31,9 @@ struct result_t                       //for statistics
     unsigned long int sequencesGood;    //good sequences
     unsigned long int sequencesLost;        //failed sequences
     unsigned long int sequencesTotal;       //number of sequences received in total
+    unsigned long int sequencesGood2;
+    unsigned long int sequencesLost2;        //type 2 nodes (submode 11 & 12)
+    unsigned long int sequencesTotal2;
     double deadline_missed_counter;
     long int ACKsLost;
     long int ACKsTransmitted;               //total number of ACKs that were transmitted
@@ -40,6 +43,7 @@ struct result_t                       //for statistics
     int max;
     float mean;
     float stddev;
+    double deadline;
 
     double delay_avg;
     double delay_min;
@@ -87,14 +91,16 @@ class Server : public cSimpleModule
     int carrierSenseMode;
     std::string vectorOutput;
     double deadline;
+    double deadline2; //RTNS mode == 7 if two node types are used
+    bool fixedDeadline;
 
     simtime_t recvStartTime;
     enum {IDLE=0, TRANSMISSION=1, COLLISION=2};
     simsignal_t channelStateSignal;
 
-    packetCount packetList[MAX_NUMBER_OF_NODES];            //array mit Infos über empfangene und verlorene Pakete jedes Knotens
-    int nodesFinishedTransmission[MAX_NUMBER_OF_NODES];     //enthält ID der Knoten, die seit letztem rxEndEvent fertig geworden sind
-    int nodesFinishedTransmissionNumber;                    //enthält Anzahl der Knoten, die seit letztem rxEndEvent fertig geworden sind
+    packetCount packetList[MAX_NUMBER_OF_NODES];            //array containing information about how many pakets were received, lost, etc. of every node
+    int nodesFinishedTransmissionIDs[MAX_NUMBER_OF_NODES];     //list containing node IDs that have finished since last rxEndEvent
+    int nodesFinishedTransmissionNumber;                    //number of nodes that have finished since last rxEndEvent
     int minHosts;
     int maxHosts;
     int HostStepSize;
@@ -105,8 +111,10 @@ class Server : public cSimpleModule
     bool WC_MODE;
     bool PAUSE;
     bool LONG_PAUSE;
-    unsigned long int haltOnPacketNumberSent;
-    unsigned long int haltOnDeadlines;
+    unsigned long int sequencesPerIteration;
+    unsigned long int sequencesPerIteration_original;
+    unsigned long int deadlinesPerIteration;
+    unsigned long int cyclesPerIteration;
     time_t timer;
     time_t timer_next;
     struct tm time_old;
@@ -120,8 +128,11 @@ class Server : public cSimpleModule
     unsigned long int packetsLost;
     unsigned long int packetsTotal;
     unsigned long int sequencesGood;                 //number of received sequences (also contains non successful sequences)
-    unsigned long int sequencesLost;                     //number of non successful sequences
+    unsigned long int sequencesLost;                 //number of non successful sequences
     unsigned long int sequencesTotal;
+    unsigned long int sequencesGood2;
+    unsigned long int sequencesLost2;                //type 2 nodes (submode 11 & 12)
+    unsigned long int sequencesTotal2;
     long int currentCollisionNumFrames;
     long int ACKsLost;
     long int packetsSkipped;
@@ -173,6 +184,8 @@ class Server : public cSimpleModule
     cPar *RTNS_packet_length2;
     bool RTNS_use_different_node_types;
     double RTNS_node_type_ratio;
+    int RTNS_node_type;
+    int RTNS_get_node_type(int ID_);  //returns 1 or 2
 
     //submode variables ///////////////////////////////////////////////////////
     double submode_steps;
@@ -252,7 +265,7 @@ class Server : public cSimpleModule
     bool ackScheduled;  //avoid scheduling acks multiple times (happens for lmax shorter than t_set)
     bool is_switching_mode;                     //true if server switches mode, e.g., from rx to tx, during RX_TX_switching_time
     bool receiverInitiated;
-    long int restartEvent_counter;  //counts number of restart events to limit simulation iterations
+    unsigned long int restartEvent_counter;  //counts number of restart events to limit simulation iterations
     double restartInterval;         //restart interval in seconds. Used to dynamically adjust the restart
     bool next_iteration_flag;       //flag that will cause start of new iteration at next restartEvent
     bool isGui;

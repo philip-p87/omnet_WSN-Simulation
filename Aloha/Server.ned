@@ -24,7 +24,7 @@ simple Server
         bool PAUSE;
         bool LONG_PAUSE;
         bool short_period;
-        int max_iteration_number;	//number of restarting transmission at random
+        int cyclesPerIteration;
         double RX_TX_switching_time @unit(us);
         double processing_delay @unit(us);
         double cs_sensitivity @unit(us);
@@ -35,12 +35,13 @@ simple Server
         int mode;
         int submode;
         bool receiverInitiated;
-        int haltOnPacketNumberSent;
-        int haltOnDeadlines;
+        int sequencesPerIteration;
+        int deadlinesPerIteration;
         double txRate @unit(bps);         // transmission rate
         volatile int pkLenBits @unit(b);  // packet length in bits
         volatile int ACKLenBits @unit(b);  // packet length in bits
         double deadline;
+        bool fixedDeadline;
         
         double CSMA_backoff_time @unit(us);
 		int CSMA_max_retransmissions;

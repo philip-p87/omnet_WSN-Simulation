@@ -13,14 +13,15 @@ network Aloha
         volatile int pkLenBits @unit(b);  // packet length in bits
         volatile int ACKLenBits @unit(b);  // packet length in bits
         @display("bgi=background/terrain,s;bgb=718,342");
-        int haltOnPacketNumberSent;
-        int haltOnDeadlines;
+        int sequencesPerIteration;
+        int deadlinesPerIteration;
+        int cyclesPerIteration;
         bool WC_MODE;
         bool PAUSE; 
         bool LONG_PAUSE;
-        int max_iteration_number;
         bool shortPeriod;
         double deadline;
+        bool fixedDeadline;
         
         bool ClockDriftEnabled;
         double ClockDriftRangePercent;
@@ -89,11 +90,11 @@ network Aloha
             minPackets = minPackets;
             maxPackets = maxPackets;
             short_period = shortPeriod;
-            haltOnPacketNumberSent = haltOnPacketNumberSent;
-            haltOnDeadlines = haltOnDeadlines;
+            sequencesPerIteration = sequencesPerIteration;
+            deadlinesPerIteration = deadlinesPerIteration;
+            cyclesPerIteration = cyclesPerIteration;
             txRate = txRate;
             pkLenBits = pkLenBits;
-            max_iteration_number = max_iteration_number;
             RX_TX_switching_time = RX_TX_switching_time;
             processing_delay = processing_delay;
             cs_sensitivity = cs_sensitivity;
@@ -101,6 +102,7 @@ network Aloha
             ACKLenBits = ACKLenBits;
             carrierSenseMode = carrierSenseMode;
             deadline = deadline;
+            fixedDeadline = fixedDeadline;
             
             CSMA_backoff_time = CSMA_backoff_time;
             CSMA_max_retransmissions = CSMA_max_retransmissions;
@@ -172,6 +174,7 @@ network Aloha
             ACKLenBits = ACKLenBits;
             carrierSenseMode = carrierSenseMode;
             deadline = deadline;
+            fixedDeadline = fixedDeadline;
             
             CSMA_backoff_time = CSMA_backoff_time;
             CSMA_max_retransmissions = CSMA_max_retransmissions;

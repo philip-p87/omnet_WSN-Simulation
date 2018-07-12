@@ -34,6 +34,7 @@ class Host : public cSimpleModule
     bool PAUSE;
     bool LONG_PAUSE;
     double deadline;
+    bool fixedDeadline;
 
     int minHosts;
     int maxHosts;
@@ -122,19 +123,24 @@ class Host : public cSimpleModule
     double RTNS_reliability;
     bool RTNS_reliability_max;
     double RTNS_m;
+    double RTNS_deadline1;  //submode 12 only
     double RTNS_deadline2;
     cPar *RTNS_packet_length2;
     bool RTNS_use_different_node_types;
     double RTNS_node_type_ratio;
-    double RTNS_tmin1, RTNS_tmin2, RTNS_tmax1, RTNS_tmax2;
+    double RTNS_tmin1, RTNS_tmax1;
     int RTNS_node_type;        //type of this node (to distinguish between different node types if RTNS_use_different_node_types == true)
     double data_duration2;
+    double RTNS_n1, RTNS_n2;
     double RTNS_get_random_pause();
     int RTNS_get_node_type();  //returns 1 or 2
+    int RTNS_get_node_type(int i);
+    void RTNS_calculate_node_numbers();     //calculates RTNS_n1 and RTNS_n2
 
 
     //submode variables ///////////////////////////////////////////////////////
     double submode_steps;
+    double submode_step_current;
     double deadline_start;
     double deadline_stop;
     double RX_TX_switching_time_start;
@@ -179,6 +185,7 @@ class Host : public cSimpleModule
     void sendPacket(char *name);
     bool check_and_transmit();  //checks for deadline etc. and then transmits a packet: returns false if transmitting failed
     double max(double a, double b);
+    double min(double a, double b);
     void reset_variables();
     void calc_sequence_stats();         //rx_time, tx_time, delay, etc
     void finish_tx();   //ends sequence
@@ -188,7 +195,7 @@ class Host : public cSimpleModule
     virtual ~Host();
 
     void activate();                    //will activate the node: starts sending
-    void change_transmission_scheme(int packetNumberMax_, int currentActiveNodes_, double RX_TX_switching_time_, double deadline_, double packet_duration_);  //changes the transmission scheme to next iteration. Called by Server node
+    void change_transmission_scheme(int packetNumberMax_, int currentActiveNodes_, double RX_TX_switching_time_, double deadline_, double packet_duration_, double submode_step_current_);  //changes the transmission scheme to next iteration. Called by Server node
     void next_plot_step(int iteration_number);
 
     void stop_transmission();
